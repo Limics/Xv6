@@ -1,0 +1,3 @@
+usertrap
+0x11 表示当前用户进程正在发起 close() 系统调用
+CPU 之前运行在 用户态（User mode）。
