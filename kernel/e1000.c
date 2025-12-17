@@ -91,40 +91,80 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
 
-int
+int 
 e1000_transmit(char *buf, int len)
 {
-  //
-  // Your code here.
-  //
-  // buf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after send completes.
-  //
+  acquire(&e1000_lock);
 
-  
+  uint32 idx = regs[E1000_TDT];
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+
+  if(tx_bufs[idx]){
+    kfree(tx_bufs[idx]);
+    tx_bufs[idx] = 0;
+  }
+
+  tx_ring[idx].addr = (uint64)buf;
+  tx_ring[idx].length = len;
+  tx_ring[idx].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[idx].status = 0;
+  tx_bufs[idx] = (char*)buf;
+
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
-static void
+void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver a buf for each packet (using net_rx()).
-  //
+  while(1){
+    char *buf;
+    int len;
 
+    acquire(&e1000_lock);
+
+    uint32 idx = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+    // 没新包就结束
+    if((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0){
+      release(&e1000_lock);
+      break;
+    }
+
+    // 取出当前包的信息
+    buf = (char*)rx_ring[idx].addr;
+    len = rx_ring[idx].length;
+
+    // 立刻补一个新 buffer 给硬件，避免丢包
+    char *newbuf = kalloc();
+    if(newbuf == 0)
+      panic("e1000_recv: kalloc");
+
+    rx_ring[idx].addr = (uint64)newbuf;
+    rx_ring[idx].status = 0;
+
+    // 更新 RDT，告诉硬件该位置已被驱动处理
+    regs[E1000_RDT] = idx;
+
+    release(&e1000_lock);
+
+    // 关键：不要持锁调用 net_rx（它可能触发 e1000_transmit 再次 acquire）
+    net_rx(buf, len);
+  }
 }
-
 void
 e1000_intr(void)
 {
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any
   // further interrupts.
+  initlock(&e1000_lock, "e1000");
   regs[E1000_ICR] = 0xffffffff;
-
+  
   e1000_recv();
 }
