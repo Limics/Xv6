@@ -49,8 +49,16 @@ usertrap(void)
   
   // save user program counter.
   p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
+  uint64 tmp = r_scause();
+  if(tmp == 15){
+    uint64 va = r_stval();
+    if(va >= MAXVA) {
+      p->killed = 1;
+    } else if(cowalloc(p->pagetable, va) == 0){
+      sfence_vma();
+    } else 
+      p->killed = 1;
+  } else if(tmp == 8){
     // system call
 
     if(killed(p))

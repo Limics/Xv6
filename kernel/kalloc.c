@@ -9,6 +9,9 @@
 #include "riscv.h"
 #include "defs.h"
 
+int refcnt[PHYSTOP/PGSIZE];
+struct spinlock ref_lock;
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -28,6 +31,7 @@ kinit()
 {
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
+  initlock(&ref_lock, "ref");
 }
 
 void
@@ -52,6 +56,11 @@ kfree(void *pa)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
+  if(krefdec((uint64)pa) > 0){
+    // 还有别的页表在用这页，不能真的 free
+    return;
+  }
+
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
@@ -60,6 +69,12 @@ kfree(void *pa)
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
+}
+
+static inline int
+pa_index(uint64 pa)
+{
+  return pa / PGSIZE;
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -76,7 +91,31 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
+  if(r) {
     memset((char*)r, 5, PGSIZE); // fill with junk
+    acquire(&ref_lock);
+    refcnt[pa_index((uint64)r)] = 1;
+    release(&ref_lock);
+  }
   return (void*)r;
+}
+
+void
+krefinc(uint64 pa)
+{
+  acquire(&ref_lock);
+  refcnt[pa_index(pa)]++;
+  release(&ref_lock);
+}
+
+// return new refcount after dec
+int
+krefdec(uint64 pa)
+{
+  int r;
+  acquire(&ref_lock);
+  refcnt[pa_index(pa)]--;
+  r = refcnt[pa_index(pa)];
+  release(&ref_lock);
+  return r;
 }

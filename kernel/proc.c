@@ -293,7 +293,8 @@ fork(void)
     freeproc(np);
     release(&np->lock);
     return -1;
-  }
+  } 
+  sfence_vma();
   np->sz = p->sz;
 
   // copy saved user registers.

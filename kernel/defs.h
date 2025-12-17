@@ -187,3 +187,8 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+
+
+void  krefinc(uint64);
+int   krefdec(uint64);
+int cowalloc(pagetable_t pagetable, uint64 va);
