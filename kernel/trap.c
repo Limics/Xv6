@@ -77,8 +77,22 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    struct proc *p = myproc();
+    if(p && p->alarmticks > 0 && p->alarm_inflight == 0){
+      p->alarm_elapsed++;
+      if(p->alarm_elapsed >= p->alarmticks){
+        p->alarm_elapsed = 0;
+        p->alarm_inflight = 1;
+
+        // test0阶段：先只跳handler，不管返回（但建议现在就备份，后面直接过 test1）
+        memmove(&p->alarm_tf_backup, p->trapframe, sizeof(struct trapframe));
+        p->trapframe->epc = p->alarmhandler;
+      }
+    }
     yield();
+  }
+    
 
   usertrapret();
 }

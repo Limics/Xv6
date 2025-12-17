@@ -146,6 +146,11 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  p->alarmticks = 0;
+  p->alarmhandler = 0;
+  p->alarm_elapsed = 0;
+  p->alarm_inflight = 0;
+
   return p;
 }
 
@@ -236,7 +241,6 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
   // allocate one user page and copy initcode's instructions
   // and data into it.
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
