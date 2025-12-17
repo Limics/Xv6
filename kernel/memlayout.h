@@ -69,3 +69,5 @@ struct usyscall {
   int pid;  // Process ID
 };
 #endif
+
+#define SUPERPGMASK (SUPERPGSIZE-1)
