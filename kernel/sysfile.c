@@ -595,26 +595,30 @@ sys_mmap(void)
 
 
 static int
-vma_writeback(struct vma *v, uint64 va, uint64 kva)
+vma_writeback(struct vma *v, uint64 va, uint64 kva)  // kva: 页的内核地址
 {
   uint64 pageoff = va - v->addr;
-  uint64 remain  = v->len - pageoff;
-  int n = (remain >= PGSIZE) ? PGSIZE : (int)remain;
-
+  // uint64 remain  = v->len - pageoff;
+  uint64 endva = v->addr + v->len;
+  uint64 page_end = va + PGSIZE;
+  int n;
+  if(page_end <= endva)
+    n = PGSIZE;
+  else if(va < endva)
+    n = endva - va;
+  else
+    return 0;
   begin_op();
   ilock(v->f->ip);
 
-  // uint64 end = v->foff + pageoff + n;
-  // if(end > v->f->ip->size){
-  //   v->f->ip->size = end;
-  //   iupdate(v->f->ip);
-  // }
-
+  // writei 会在需要时更新 ip->size，所以你自己改 size 其实不必
   int r = writei(v->f->ip, 0, kva, v->foff + pageoff, n);
 
   iunlock(v->f->ip);
   end_op();
-  return r;
+
+  if(r != n) return -1;   // ✅ 关键：必须写满
+  return 0;
 }
 
 static struct vma*
@@ -657,11 +661,14 @@ do_munmap(struct proc *p, uint64 addr, uint64 len)
     pte_t *pte = walk(p->pagetable, va, 0);
     if(pte && (*pte & PTE_V)){
       uint64 pa = PTE2PA(*pte);
-      // uint64 kva = pa2kva(pa);
+      uint64 kva = pa;
+
+      if(kva < KERNBASE)
+        kva = pa + KERNBASE;
 
       if(v->flags == MAP_SHARED){
-        int r = vma_writeback(v, va, pa);
-        if(r < 0) return -1;
+        if(vma_writeback(v, va, kva) < 0)
+          return -1;
       }
       uvmunmap(p->pagetable, va, 1, 1);
     }

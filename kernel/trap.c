@@ -276,8 +276,13 @@ handle_mmap_fault(struct proc *p, uint64 va, int isstore)
   }
 
   int perm = PTE_U;
-  if(v->prot & PROT_READ)  perm |= PTE_R;
-  if(v->prot & PROT_WRITE) perm |= PTE_W;
+
+  if(v->prot & PROT_WRITE){
+    perm |= PTE_W;
+    perm |= PTE_R;   // ✅ RISC-V 要求：W=>R
+  } else if(v->prot & PROT_READ){
+    perm |= PTE_R;
+  }
   // PROT_EXEC 本 lab 不要求，但你也可以加：
   // if(v->prot & PROT_EXEC) perm |= PTE_X;
 
