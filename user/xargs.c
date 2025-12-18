@@ -8,18 +8,15 @@ int main(int argc, char *argv[]) {
     exit(1);
   }
 
-  // declare an new argv array
   char *new_argv[MAXARG], **arg_ptr = new_argv;
   char buf[512];  // store extra arguments read from standard input
   char *p = buf;  // position of current char
   char *r = buf;  // position of current argument
 
-  // get original arguments
   for (int i = 1; i < argc; i++) {
     *arg_ptr++ = argv[i];
   }
 
-  // get extra arguments
   while (read(0, p, 1) == 1) {
     if (*p == ' ') {
       *p = 0;

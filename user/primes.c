@@ -7,21 +7,16 @@ int p1[2];
 int p2[2];
 
 __attribute__((noreturn)) void seive() {
-  // read the first number from left pipe and print
   int prime;
   close(p1[1]);
   if (read(p1[0], &prime, sizeof(prime))) {
     printf("prime %d\n", prime);
   } else {
-    // EOF, left neighbor pipe only received one number
-    // finised
     exit(0);
   }
 
-  // read other numbers from left pipe
   int x;
   pipe(p2);
-  // parent process: start to seive
   if (fork() > 0) {
     close(p2[0]);
     while (read(p1[0], &x, sizeof(x))) {
@@ -34,7 +29,6 @@ __attribute__((noreturn)) void seive() {
     wait(0);
     exit(0);
   }
-  // child process: close unnecessary pipes and recur
   else {
     close(p1[0]);
     p1[0] = p2[0];
