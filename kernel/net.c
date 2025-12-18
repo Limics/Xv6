@@ -20,7 +20,7 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 static struct spinlock netlock;
 
 #define UDPQ_MAX 16
-#define NPORTS   64   // 足够通过测试
+#define NPORTS   65535
 
 struct udpqent {
   char   *pkt;       // 整个以太/IP/UDP/负载包的起始地址（kalloc 的）
