@@ -3,13 +3,21 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+
 
 struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
+
+static struct vma* vma_lookup(struct proc *p, uint64 va);
+static int handle_mmap_fault(struct proc *p, uint64 va, int isstore);
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -50,7 +58,17 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  uint64 scause = r_scause();
+  uint64 stval  = r_stval();
+
+  if(scause == 13 || scause == 15){
+    int isstore = (scause == 15);
+    if(handle_mmap_fault(p, stval, isstore) == 0){
+      // 处理成功，直接返回用户态继续执行
+    } else {
+      p->killed = 1;
+    }
+  } else if(scause == 8){
     // system call
 
     if(killed(p))
@@ -216,3 +234,57 @@ devintr()
   }
 }
 
+static struct vma*
+vma_lookup(struct proc *p, uint64 va)
+{
+  for(int i=0;i<NVMA;i++){
+    if(!p->vmas[i].used) continue;
+    if(va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].len)
+      return &p->vmas[i];
+  }
+  return 0;
+}
+
+static int
+handle_mmap_fault(struct proc *p, uint64 va, int isstore)
+{
+  va = PGROUNDDOWN(va);
+  struct vma *v = vma_lookup(p, va);
+  if(v == 0) return -1;
+
+  if(isstore && !(v->prot & PROT_WRITE)) return -1;
+  if(!isstore && !(v->prot & PROT_READ)) return -1;
+
+  // 已经映射就不管（避免重复 fault）
+  pte_t *pte = walk(p->pagetable, va, 0);
+  if(pte && (*pte & PTE_V)) return 0;
+
+  char *mem = kalloc();
+  if(mem == 0) return -1;
+  memset(mem, 0, PGSIZE);
+
+  // 从文件读一页
+  uint64 off = (va - v->addr) + v->foff;
+  struct inode *ip = v->f->ip;
+
+  ilock(ip);
+  int n = readi(ip, 0, (uint64)mem, off, PGSIZE);
+  iunlock(ip);
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  int perm = PTE_U;
+  if(v->prot & PROT_READ)  perm |= PTE_R;
+  if(v->prot & PROT_WRITE) perm |= PTE_W;
+  // PROT_EXEC 本 lab 不要求，但你也可以加：
+  // if(v->prot & PROT_EXEC) perm |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}

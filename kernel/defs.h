@@ -237,3 +237,6 @@ void            netinit(void);
 void            net_rx(char *buf, int len);
 
 #endif
+
+
+int do_munmap(struct proc *p, uint64 addr, uint64 len);

@@ -125,6 +125,8 @@ found:
   p->pid = allocpid();
   p->state = USED;
 
+  memset(p->vmas, 0, sizeof(p->vmas));
+
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -169,6 +171,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  memset(p->vmas, 0, sizeof(p->vmas));
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -296,6 +299,37 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // 复制 VMA 元数据（并 filedup）
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];          // 结构体浅拷贝
+      np->vmas[i].f = filedup(p->vmas[i].f); // 关键：文件引用计数+1
+    } else {
+      np->vmas[i].used = 0;
+    }
+  }
+  // 新增：复制父进程已经映射的 mmap 页
+  for(i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used) continue;
+    struct vma *v = &p->vmas[i];
+
+    for(uint64 va = v->addr; va < v->addr + v->len; va += PGSIZE){
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte && (*pte & PTE_V) && (*pte & PTE_U)){
+        uint64 pa = PTE2PA(*pte);
+        char *mem = kalloc();
+        if(mem == 0) goto bad;
+        memmove(mem, (void*)pa, PGSIZE);
+        // 保持权限与父进程一致
+        int perm = PTE_FLAGS(*pte) & (PTE_R|PTE_W|PTE_X|PTE_U);
+        if(mappages(np->pagetable, va, PGSIZE, (uint64)mem, perm) < 0){
+          kfree(mem);
+          goto bad;
+        }
+      }
+    }
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -323,6 +357,12 @@ fork(void)
   release(&np->lock);
 
   return pid;
+
+bad:
+  // 失败清理：freeproc 会释放页表（包括我们新 mappages 的页）
+  freeproc(np);
+  release(&np->lock);
+  return -1;
 }
 
 // Pass p's abandoned children to init.
@@ -357,6 +397,13 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // 退出前清理所有 mmap(VMA) 
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      do_munmap(p, p->vmas[i].addr, p->vmas[i].len);
     }
   }
 

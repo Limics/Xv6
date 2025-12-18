@@ -1,3 +1,5 @@
+#define NVMA 16
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -81,6 +83,17 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+
+struct vma {
+  int used;
+  uint64 addr;      // 起始虚拟地址（页对齐）
+  uint64 len;       // 映射长度（页对齐）
+  int prot;         // PROT_READ/PROT_WRITE
+  int flags;        // MAP_SHARED / MAP_PRIVATE
+  uint64 foff;      // 文件内偏移（lab 里 offset=0，但做成字段更稳）
+  struct file *f;   // 被映射的文件
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +117,5 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[NVMA];
 };

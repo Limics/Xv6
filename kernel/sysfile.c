@@ -15,6 +15,8 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
+#define MMAPTOP (TRAPFRAME)
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -502,4 +504,197 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+static struct vma*
+vma_alloc(struct proc *p)
+{
+  for(int i=0;i<NVMA;i++){
+    if(p->vmas[i].used == 0){
+      p->vmas[i].used = 1;
+      return &p->vmas[i];
+    }
+  }
+  return 0;
+}
+
+static uint64
+vma_find_space(struct proc *p, uint64 len)
+{
+  uint64 base = MMAPTOP;
+  uint64 cand = PGROUNDDOWN(base - len);
+
+  for(int tries=0; tries<NVMA+2; tries++){
+    int overlap = 0;
+    for(int i=0;i<NVMA;i++){
+      if(!p->vmas[i].used) continue;
+      uint64 a0=p->vmas[i].addr, a1=p->vmas[i].addr+p->vmas[i].len;
+      uint64 b0=cand, b1=cand+len;
+      if(!(b1<=a0 || b0>=a1)){
+        overlap = 1;
+        cand = PGROUNDDOWN(a0 - len); // 放到这个 VMA 下方再试
+        break;
+      }
+    }
+    if(!overlap){
+      if(cand < p->sz) return 0; 
+      return cand;
+    }
+  }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 uaddr;
+  int len, prot, flags, fd;
+  int offset;
+
+  argaddr(0, &uaddr);
+  argint(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &offset);
+
+  if(uaddr != 0) return (uint64)-1;
+  if(len <= 0) return (uint64)-1;
+  if(offset != 0) return (uint64)-1;
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE) return (uint64)-1;
+  if((prot & (PROT_READ|PROT_WRITE)) == 0) return (uint64)-1;
+
+  if(fd < 0 || fd >= NOFILE) return (uint64)-1;
+
+  struct proc *p = myproc();
+  struct file *f = p->ofile[fd];
+  if(f == 0) return (uint64)-1;
+  if(f->type != FD_INODE) return (uint64)-1;
+
+  if((prot & PROT_READ) && f->readable == 0)
+    return (uint64)-1;
+  if((prot & PROT_WRITE) && flags == MAP_SHARED && f->writable == 0)
+    return (uint64)-1;
+
+  uint64 mlen = PGROUNDUP((uint64)len);
+  uint64 va = vma_find_space(p, mlen);
+  if(va == 0) return (uint64)-1;
+
+  struct vma *v = vma_alloc(p);
+  if(v == 0) return (uint64)-1;
+
+  v->addr = va;
+  v->len = mlen;
+  v->prot = prot;
+  v->flags = flags;
+  v->foff = 0;
+  v->f = filedup(f);
+
+  return va;
+}
+
+
+static int
+vma_writeback(struct vma *v, uint64 va, uint64 kva)
+{
+  uint64 pageoff = va - v->addr;
+  uint64 remain  = v->len - pageoff;
+  int n = (remain >= PGSIZE) ? PGSIZE : (int)remain;
+
+  begin_op();
+  ilock(v->f->ip);
+
+  // uint64 end = v->foff + pageoff + n;
+  // if(end > v->f->ip->size){
+  //   v->f->ip->size = end;
+  //   iupdate(v->f->ip);
+  // }
+
+  int r = writei(v->f->ip, 0, kva, v->foff + pageoff, n);
+
+  iunlock(v->f->ip);
+  end_op();
+  return r;
+}
+
+static struct vma*
+vma_lookup(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used) continue;
+    if(va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].len)
+      return &p->vmas[i];
+  }
+  return 0;
+}
+
+static inline uint64
+pa2kva(uint64 pa)
+{
+  // 如果 pa 已经在内核直映区（>=KERNBASE），直接返回
+  // 否则加上 KERNBASE 把物理地址变成内核虚拟地址
+  if(pa >= KERNBASE)
+    return pa;
+  return pa + KERNBASE;
+}
+
+int
+do_munmap(struct proc *p, uint64 addr, uint64 len)
+{
+  if(len <= 0) return 0;
+  uint64 a0 = PGROUNDDOWN(addr);
+  uint64 a1 = PGROUNDUP(addr + len);
+
+  struct vma *v = vma_lookup(p, a0);
+  if(v == 0) return 0; // mmaptest 期望“没映射也 OK”
+
+  // 限制：只能从头/尾/全段
+  uint64 v0=v->addr, v1=v->addr+v->len;
+  if(!(a0==v0 || a1==v1 || (a0==v0 && a1==v1))) return -1;
+  if(a0 < v0 || a1 > v1) return -1;
+
+  for(uint64 va=a0; va<a1; va+=PGSIZE){
+    pte_t *pte = walk(p->pagetable, va, 0);
+    if(pte && (*pte & PTE_V)){
+      uint64 pa = PTE2PA(*pte);
+      // uint64 kva = pa2kva(pa);
+
+      if(v->flags == MAP_SHARED){
+        int r = vma_writeback(v, va, pa);
+        if(r < 0) return -1;
+      }
+      uvmunmap(p->pagetable, va, 1, 1);
+    }
+  }
+
+  // 更新 VMA
+  uint64 unlen = a1 - a0;
+  if(a0 == v->addr && a1 == v->addr + v->len){
+    // 全删
+    struct file *f = v->f;
+    v->used = 0;
+    v->f = 0;
+    fileclose(f);
+  } else if(a0 == v->addr){
+    // 删头
+    v->addr += unlen;
+    v->len  -= unlen;
+    v->foff += unlen;
+  } else { // a1 == v1
+    // 删尾
+    v->len -= unlen;
+  }
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int len;
+  argaddr(0, &addr);
+  argint(1, &len);
+
+  struct proc *p = myproc();
+  return do_munmap(p, addr, (uint64)len);
 }
