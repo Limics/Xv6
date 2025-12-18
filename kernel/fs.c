@@ -417,6 +417,57 @@ bmap(struct inode *ip, uint bn)
     return addr;
   }
 
+  // 处理 double 的情况
+  bn -= NINDIRECT;
+  if(bn < NINDIRECT * NINDIRECT){
+    uint dind, ind;
+    struct buf *bp2;
+    uint *a2;
+
+    // allocate/load doubly-indirect block
+    if((dind = ip->addrs[NDIRECT+1]) == 0){
+      dind = balloc(ip->dev);
+      if(dind == 0)
+        return 0;
+      ip->addrs[NDIRECT+1] = dind;
+    }
+
+    // read doubly-indirect block (256 entries, each points to a singly-indirect block)
+    bp = bread(ip->dev, dind);
+    a = (uint*)bp->data;
+
+    uint idx1 = bn / NINDIRECT;   // which singly-indirect block
+    uint idx2 = bn % NINDIRECT;   // offset within that singly-indirect block
+
+    // allocate singly-indirect block if needed
+    if((ind = a[idx1]) == 0){
+      ind = balloc(ip->dev);
+      if(ind == 0){
+        brelse(bp);
+        return 0;
+      }
+      a[idx1] = ind;
+      log_write(bp);
+    }
+    brelse(bp);
+
+    // now map within that singly-indirect block
+    bp2 = bread(ip->dev, ind);
+    a2 = (uint*)bp2->data;
+
+    if((addr = a2[idx2]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0){
+        brelse(bp2);
+        return 0;
+      }
+      a2[idx2] = addr;
+      log_write(bp2);
+    }
+    brelse(bp2);
+    return addr;
+  }
+
   panic("bmap: out of range");
 }
 
@@ -446,6 +497,34 @@ itrunc(struct inode *ip)
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  // double 
+  if(ip->addrs[NDIRECT+1]){
+    struct buf *bp2;
+    uint *a2;
+    // read doubly-indirect block
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i]){
+        // read singly-indirect block pointed by a[i]
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint*)bp2->data;
+
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j])
+            bfree(ip->dev, a2[j]);
+        }
+        brelse(bp2);
+        // free the singly-indirect block itself
+        bfree(ip->dev, a[i]);
+      }
+    }
+    brelse(bp);
+    // free the doubly-indirect block itself
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
   }
 
   ip->size = 0;

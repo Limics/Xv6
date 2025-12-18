@@ -41,3 +41,6 @@ void *memcpy(void *, const void *, uint);
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+
+int symlink(const char *target, const char *path);
