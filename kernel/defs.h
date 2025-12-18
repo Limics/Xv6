@@ -12,6 +12,13 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+#ifdef LAB_NET
+struct mbuf;
+struct sock;
+#endif
+
+#define max(a, b) ((a) > (b) ? (a) : (b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
 
 // bio.c
 void            binit(void);
@@ -37,6 +44,7 @@ void            fileinit(void);
 int             fileread(struct file*, uint64, int n);
 int             filestat(struct file*, uint64 addr);
 int             filewrite(struct file*, uint64, int n);
+int             writeback(struct file*, off_t, uint64, int);
 
 // fs.c
 void            fsinit(int);
@@ -81,7 +89,7 @@ int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
 
 // printf.c
-int            printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
+void            printf(char*, ...);
 void            panic(char*) __attribute__((noreturn));
 void            printfinit(void);
 
@@ -99,6 +107,8 @@ void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
 struct cpu*     getmycpu(void);
 struct proc*    myproc();
+struct vma *    allocvma(void);
+void            freevma(struct vma *);
 void            procinit(void);
 void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
@@ -121,7 +131,9 @@ void            initlock(struct spinlock*, char*);
 void            release(struct spinlock*);
 void            push_off(void);
 void            pop_off(void);
+#if defined(LAB_LOCK) || defined(LAB_NET)
 int             atomic_read4(int *addr);
+#endif
 #ifdef LAB_LOCK
 void            freelock(struct spinlock*);
 #endif
@@ -181,12 +193,10 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
-#if defined(LAB_PGTBL) || defined(SOL_MMAP)
-void            vmprint(pagetable_t);
-#endif
-#ifdef LAB_PGTBL
-pte_t*          pgpte(pagetable_t, uint64);
-#endif
+int             do_mmap_page(struct vma*, uint64, pte_t*);
+uint64          mmap(struct proc*, uint64, size_t, int, int, 
+                     struct file*, off_t offset);
+uint64          munmap(struct proc*, uint64, uint64);
 
 // plic.c
 void            plicinit(void);
@@ -216,7 +226,7 @@ void            statsinit(void);
 void            statsinc(void);
 
 // sprintf.c
-int             snprintf(char*, unsigned long, const char*, ...);
+int             snprintf(char*, int, char*, ...);
 #endif
 
 #ifdef KCSAN
@@ -230,13 +240,17 @@ void            pci_init();
 // e1000.c
 void            e1000_init(uint32 *);
 void            e1000_intr(void);
-int             e1000_transmit(char *, int);
+int             e1000_transmit(struct mbuf*);
 
 // net.c
-void            netinit(void);
-void            net_rx(char *buf, int len);
+void            net_rx(struct mbuf*);
+void            net_tx_udp(struct mbuf*, uint32, uint16, uint16);
 
+// sysnet.c
+void            sockinit(void);
+int             sockalloc(struct file **, uint32, uint16, uint16);
+void            sockclose(struct sock *);
+int             sockread(struct sock *, uint64, int);
+int             sockwrite(struct sock *, uint64, int);
+void            sockrecvudp(struct mbuf*, uint32, uint16, uint16);
 #endif
-
-
-int do_munmap(struct proc *p, uint64 addr, uint64 len);

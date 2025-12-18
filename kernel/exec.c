@@ -7,6 +7,8 @@
 #include "defs.h"
 #include "elf.h"
 
+#define USERSTACK 1
+
 static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
 
 int flags2perm(int flags)

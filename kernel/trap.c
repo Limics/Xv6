@@ -3,21 +3,13 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
-#include "sleeplock.h"
-#include "fs.h"
-#include "file.h"
 #include "proc.h"
 #include "defs.h"
-#include "fcntl.h"
-
 
 struct spinlock tickslock;
 uint ticks;
 
 extern char trampoline[], uservec[], userret[];
-
-static struct vma* vma_lookup(struct proc *p, uint64 va);
-static int handle_mmap_fault(struct proc *p, uint64 va, int isstore);
 
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
@@ -44,7 +36,11 @@ trapinithart(void)
 void
 usertrap(void)
 {
-  int which_dev = 0;
+  uint64 scause;
+  uint64 va, pa;
+  pte_t *pte;
+  struct vma *vma = 0, *iter;
+  int which_dev = 0, rc;
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -58,17 +54,7 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  uint64 scause = r_scause();
-  uint64 stval  = r_stval();
-
-  if(scause == 13 || scause == 15){
-    int isstore = (scause == 15);
-    if(handle_mmap_fault(p, stval, isstore) == 0){
-      // 处理成功，直接返回用户态继续执行
-    } else {
-      p->killed = 1;
-    }
-  } else if(scause == 8){
+  if((scause = r_scause()) == 8){
     // system call
 
     if(killed(p))
@@ -85,9 +71,41 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else
+  if (scause == 12 || scause == 13 || scause == 15) {
+    // instruction/load/store/AMO page fault
+
+    va = r_stval();
+    if (va >= MAXVA)
+      goto KILL;
+    
+    va = PGROUNDDOWN(va);
+    pte = walk(p->pagetable, va, 0);
+    if (!pte)    // no page table entry for va
+      goto KILL;
+
+    pa = PTE2PA(*pte);
+    if (pa != 0) // page access permission denied
+      goto KILL;
+
+    for (iter = p->vma; iter; iter = iter->next) {
+      if (va >= iter->start && va < iter->end) {
+        vma = iter;
+        break;
+      }
+    }
+    if (!vma) // va is out of mmap-ed range
+      goto KILL;
+
+    rc = do_mmap_page(vma, va, pte);
+    if (rc != 0) {
+      printf("do_mmap_page failed: %d\n", rc);
+      goto KILL;
+    }
   } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+  KILL:
+    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
     setkilled(p);
   }
 
@@ -163,13 +181,13 @@ kerneltrap()
     panic("kerneltrap: interrupts enabled");
 
   if((which_dev = devintr()) == 0){
-    // interrupt or trap from an unknown source
-    printf("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(), r_stval());
+    printf("scause %p\n", scause);
+    printf("sepc=%p stval=%p\n", r_sepc(), r_stval());
     panic("kerneltrap");
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
+  if(which_dev == 2 && myproc() != 0 && myproc()->state == RUNNING)
     yield();
 
   // the yield() may have caused some traps to occur,
@@ -181,17 +199,10 @@ kerneltrap()
 void
 clockintr()
 {
-  if(cpuid() == 0){
-    acquire(&tickslock);
-    ticks++;
-    wakeup(&ticks);
-    release(&tickslock);
-  }
-
-  // ask for the next timer interrupt. this also clears
-  // the interrupt request. 1000000 is about a tenth
-  // of a second.
-  w_stimecmp(r_time() + 1000000);
+  acquire(&tickslock);
+  ticks++;
+  wakeup(&ticks);
+  release(&tickslock);
 }
 
 // check if it's an external interrupt or software interrupt,
@@ -204,7 +215,8 @@ devintr()
 {
   uint64 scause = r_scause();
 
-  if(scause == 0x8000000000000009L){
+  if((scause & 0x8000000000000000L) &&
+     (scause & 0xff) == 9){
     // this is a supervisor external interrupt, via PLIC.
 
     // irq indicates which device interrupted.
@@ -225,71 +237,20 @@ devintr()
       plic_complete(irq);
 
     return 1;
-  } else if(scause == 0x8000000000000005L){
-    // timer interrupt.
-    clockintr();
+  } else if(scause == 0x8000000000000001L){
+    // software interrupt from a machine-mode timer interrupt,
+    // forwarded by timervec in kernelvec.S.
+
+    if(cpuid() == 0){
+      clockintr();
+    }
+    
+    // acknowledge the software interrupt by clearing
+    // the SSIP bit in sip.
+    w_sip(r_sip() & ~2);
+
     return 2;
   } else {
     return 0;
   }
-}
-
-static struct vma*
-vma_lookup(struct proc *p, uint64 va)
-{
-  for(int i=0;i<NVMA;i++){
-    if(!p->vmas[i].used) continue;
-    if(va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].len)
-      return &p->vmas[i];
-  }
-  return 0;
-}
-
-static int
-handle_mmap_fault(struct proc *p, uint64 va, int isstore)
-{
-  va = PGROUNDDOWN(va);
-  struct vma *v = vma_lookup(p, va);
-  if(v == 0) return -1;
-
-  if(isstore && !(v->prot & PROT_WRITE)) return -1;
-  if(!isstore && !(v->prot & PROT_READ)) return -1;
-
-  // 已经映射就不管（避免重复 fault）
-  pte_t *pte = walk(p->pagetable, va, 0);
-  if(pte && (*pte & PTE_V)) return 0;
-
-  char *mem = kalloc();
-  if(mem == 0) return -1;
-  memset(mem, 0, PGSIZE);
-
-  // 从文件读一页
-  uint64 off = (va - v->addr) + v->foff;
-  struct inode *ip = v->f->ip;
-
-  ilock(ip);
-  int n = readi(ip, 0, (uint64)mem, off, PGSIZE);
-  iunlock(ip);
-  if(n < 0){
-    kfree(mem);
-    return -1;
-  }
-
-  int perm = PTE_U;
-
-  if(v->prot & PROT_WRITE){
-    perm |= PTE_W;
-    perm |= PTE_R;   // ✅ RISC-V 要求：W=>R
-  } else if(v->prot & PROT_READ){
-    perm |= PTE_R;
-  }
-  // PROT_EXEC 本 lab 不要求，但你也可以加：
-  // if(v->prot & PROT_EXEC) perm |= PTE_X;
-
-  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, perm) < 0){
-    kfree(mem);
-    return -1;
-  }
-
-  return 0;
 }

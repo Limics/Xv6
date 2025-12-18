@@ -1,5 +1,6 @@
 #define NPROC        64  // maximum number of processes
 #define NCPU          8  // maximum number of CPUs
+#define NVMA         16  // maximum number of virtual memory areas
 #define NOFILE       16  // open files per process
 #define NFILE       100  // open files per system
 #define NINODE       50  // maximum number of active i-nodes
@@ -11,5 +12,3 @@
 #define NBUF         (MAXOPBLOCKS*3)  // size of disk block cache
 #define FSSIZE       2000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
-#define USERSTACK    1     // user stack pages
-
